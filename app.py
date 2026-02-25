@@ -2,6 +2,8 @@ import streamlit as st
 from supabase import create_client, Client
 import yfinance as yf
 import pandas as pd
+import requests
+import time
 from datetime import datetime
 
 # ── Page Config ───────────────────────────────────────────────────────────────
@@ -70,26 +72,88 @@ def fmt_pct(v):
     return f"{sign}{float(v):.2f}%"
 
 def fetch_market_data(ticker: str) -> dict | None:
-    try:
-        info = yf.Ticker(ticker).info
-        price      = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-        prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
-        if not price:
-            return None
-        chg = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else None
-        raw_cap = info.get("marketCap")
-        return {
-            "name":        info.get("shortName") or info.get("longName") or ticker.upper(),
-            "price":       round(float(price), 2),
-            "change_pct":  chg,
-            "pe_ratio":    round(float(info["trailingPE"]), 2) if info.get("trailingPE") else None,
-            "week52_high": round(float(info["fiftyTwoWeekHigh"]), 2) if info.get("fiftyTwoWeekHigh") else None,
-            "week52_low":  round(float(info["fiftyTwoWeekLow"]), 2) if info.get("fiftyTwoWeekLow") else None,
-            "market_cap":  fmt_cap(raw_cap),
-        }
-    except Exception as e:
-        st.error(f"yfinance error: {e}")
-        return None
+    """
+    Fetch stock data from Yahoo Finance via yfinance.
+    Uses a real browser User-Agent to avoid being blocked on cloud servers.
+    Falls back to fast_info if .info fails.
+    Retries up to 3 times with a short delay.
+    """
+    # Patch requests session with browser headers so Yahoo Finance doesn't block us
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection":      "keep-alive",
+    })
+
+    t = yf.Ticker(ticker, session=session)
+
+    for attempt in range(3):
+        try:
+            # ── Primary: use .info ────────────────────────────────────────────
+            info = t.info
+
+            # Validate we got real data back (not an empty dict)
+            if not info or len(info) < 5:
+                raise ValueError("Empty info response from Yahoo Finance")
+
+            price      = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+
+            if not price:
+                raise ValueError("No price data in info")
+
+            chg = round(((float(price) - float(prev_close)) / float(prev_close)) * 100, 2) if prev_close else None
+
+            return {
+                "name":        info.get("shortName") or info.get("longName") or ticker.upper(),
+                "price":       round(float(price), 2),
+                "change_pct":  chg,
+                "pe_ratio":    round(float(info["trailingPE"]), 2) if info.get("trailingPE") else None,
+                "week52_high": round(float(info["fiftyTwoWeekHigh"]), 2) if info.get("fiftyTwoWeekHigh") else None,
+                "week52_low":  round(float(info["fiftyTwoWeekLow"]), 2) if info.get("fiftyTwoWeekLow") else None,
+                "market_cap":  fmt_cap(info.get("marketCap")),
+            }
+
+        except Exception as e1:
+            # ── Fallback: use fast_info (lighter endpoint, less likely to be blocked) ──
+            try:
+                fi = t.fast_info
+                price      = fi.last_price
+                prev_close = fi.previous_close
+
+                if not price:
+                    raise ValueError("No price in fast_info either")
+
+                chg = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else None
+
+                return {
+                    "name":        ticker.upper(),
+                    "price":       round(float(price), 2),
+                    "change_pct":  chg,
+                    "pe_ratio":    None,
+                    "week52_high": round(float(fi.year_high), 2) if fi.year_high else None,
+                    "week52_low":  round(float(fi.year_low), 2)  if fi.year_low  else None,
+                    "market_cap":  fmt_cap(fi.market_cap) if fi.market_cap else None,
+                }
+
+            except Exception as e2:
+                if attempt < 2:
+                    time.sleep(1.5)   # wait before retry
+                    continue
+                # All attempts failed — surface a clear error
+                st.error(
+                    f"Could not fetch **{ticker}** after 3 attempts. "
+                    f"Yahoo Finance may be temporarily rate-limiting this server. "
+                    f"Please try again in a moment. (Detail: {e2})"
+                )
+                return None
 
 # ── Supabase CRUD ─────────────────────────────────────────────────────────────
 
