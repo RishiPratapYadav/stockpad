@@ -1,9 +1,7 @@
 import streamlit as st
 from supabase import create_client, Client
-import yfinance as yf
 import pandas as pd
 import requests
-import time
 from datetime import datetime
 
 # ── Page Config ───────────────────────────────────────────────────────────────
@@ -47,6 +45,16 @@ def get_supabase() -> Client:
 
 supabase = get_supabase()
 
+# ── Finnhub Client ────────────────────────────────────────────────────────────
+FINNHUB_KEY = st.secrets["FINNHUB_KEY"]
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+
+def finnhub_get(endpoint: str, params: dict) -> dict:
+    params["token"] = FINNHUB_KEY
+    r = requests.get(f"{FINNHUB_BASE}/{endpoint}", params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 SENTIMENTS   = ["", "🟢 Bullish", "🔴 Bearish", "🟡 Neutral", "⚪ Watching"]
 USER_FIELDS  = ["target_buy", "target_sell", "price_tag", "price_tag_pct", "sentiment", "comments"]
@@ -73,87 +81,54 @@ def fmt_pct(v):
 
 def fetch_market_data(ticker: str) -> dict | None:
     """
-    Fetch stock data from Yahoo Finance via yfinance.
-    Uses a real browser User-Agent to avoid being blocked on cloud servers.
-    Falls back to fast_info if .info fails.
-    Retries up to 3 times with a short delay.
+    Fetch stock data from Finnhub API.
+    Uses 3 endpoints: quote (price), profile2 (name/mktcap), metric (PE, 52W).
+    Finnhub is reliable on cloud servers and allows 60 calls/min on free tier.
     """
-    # Patch requests session with browser headers so Yahoo Finance doesn't block us
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-    })
+    try:
+        t = ticker.upper()
 
-    t = yf.Ticker(ticker, session=session)
+        # ── 1. Real-time quote ────────────────────────────────────────────────
+        quote = finnhub_get("quote", {"symbol": t})
+        price = quote.get("c")   # current price
+        prev  = quote.get("pc")  # previous close
 
-    for attempt in range(3):
-        try:
-            # ── Primary: use .info ────────────────────────────────────────────
-            info = t.info
+        if not price or price == 0:
+            st.error(f"Ticker **{t}** not found on Finnhub. Check the symbol and try again.")
+            return None
 
-            # Validate we got real data back (not an empty dict)
-            if not info or len(info) < 5:
-                raise ValueError("Empty info response from Yahoo Finance")
+        chg = round(((price - prev) / prev) * 100, 2) if prev else None
 
-            price      = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+        # ── 2. Company profile (name, market cap) ────────────────────────────
+        profile = finnhub_get("stock/profile2", {"symbol": t})
+        name    = profile.get("name") or t
+        mktcap  = profile.get("marketCapitalization")  # in millions
+        mktcap_fmt = fmt_cap(mktcap * 1_000_000) if mktcap else None
 
-            if not price:
-                raise ValueError("No price data in info")
+        # ── 3. Basic financials (PE, 52W high/low) ───────────────────────────
+        metrics_resp = finnhub_get("stock/metric", {"symbol": t, "metric": "all"})
+        m = metrics_resp.get("metric", {})
 
-            chg = round(((float(price) - float(prev_close)) / float(prev_close)) * 100, 2) if prev_close else None
+        pe       = m.get("peBasicExclExtraTTM") or m.get("peTTM")
+        high52   = m.get("52WeekHigh")
+        low52    = m.get("52WeekLow")
 
-            return {
-                "name":        info.get("shortName") or info.get("longName") or ticker.upper(),
-                "price":       round(float(price), 2),
-                "change_pct":  chg,
-                "pe_ratio":    round(float(info["trailingPE"]), 2) if info.get("trailingPE") else None,
-                "week52_high": round(float(info["fiftyTwoWeekHigh"]), 2) if info.get("fiftyTwoWeekHigh") else None,
-                "week52_low":  round(float(info["fiftyTwoWeekLow"]), 2) if info.get("fiftyTwoWeekLow") else None,
-                "market_cap":  fmt_cap(info.get("marketCap")),
-            }
+        return {
+            "name":        name,
+            "price":       round(float(price), 2),
+            "change_pct":  chg,
+            "pe_ratio":    round(float(pe), 2) if pe else None,
+            "week52_high": round(float(high52), 2) if high52 else None,
+            "week52_low":  round(float(low52), 2)  if low52  else None,
+            "market_cap":  mktcap_fmt,
+        }
 
-        except Exception as e1:
-            # ── Fallback: use fast_info (lighter endpoint, less likely to be blocked) ──
-            try:
-                fi = t.fast_info
-                price      = fi.last_price
-                prev_close = fi.previous_close
-
-                if not price:
-                    raise ValueError("No price in fast_info either")
-
-                chg = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else None
-
-                return {
-                    "name":        ticker.upper(),
-                    "price":       round(float(price), 2),
-                    "change_pct":  chg,
-                    "pe_ratio":    None,
-                    "week52_high": round(float(fi.year_high), 2) if fi.year_high else None,
-                    "week52_low":  round(float(fi.year_low), 2)  if fi.year_low  else None,
-                    "market_cap":  fmt_cap(fi.market_cap) if fi.market_cap else None,
-                }
-
-            except Exception as e2:
-                if attempt < 2:
-                    time.sleep(1.5)   # wait before retry
-                    continue
-                # All attempts failed — surface a clear error
-                st.error(
-                    f"Could not fetch **{ticker}** after 3 attempts. "
-                    f"Yahoo Finance may be temporarily rate-limiting this server. "
-                    f"Please try again in a moment. (Detail: {e2})"
-                )
-                return None
+    except requests.exceptions.HTTPError as e:
+        st.error(f"Finnhub API error for **{ticker}**: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error fetching **{ticker}**: {e}")
+        return None
 
 # ── Supabase CRUD ─────────────────────────────────────────────────────────────
 
