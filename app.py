@@ -257,8 +257,8 @@ else:
         with fc1:
             f_ticker = st.text_input("Ticker contains", key="f_ticker", placeholder="e.g. AA").upper()
         with fc2:
-            all_sectors = ["All"] + sorted(raw_df["Sector"].dropna().unique().tolist())
-            f_sector = st.selectbox("Sector", all_sectors, key="f_sector")
+            all_industries = ["All"] + sorted(raw_df["Industry"].dropna().unique().tolist())
+            f_industry = st.selectbox("Industry", all_industries, key="f_industry")
         with fc3:
             all_sentiments = ["All"] + [s for s in SENTIMENTS if s]
             f_sentiment = st.selectbox("Sentiment", all_sentiments, key="f_sent")
@@ -303,8 +303,8 @@ else:
 
     if f_ticker:
         mask &= raw_df["Ticker"].str.contains(f_ticker, case=False, na=False)
-    if f_sector != "All":
-        mask &= raw_df["Sector"] == f_sector
+    if f_industry != "All":
+        mask &= raw_df["Industry"] == f_industry
     if f_sentiment != "All":
         mask &= raw_df["Sentiment"] == f_sentiment
     if f_gainers_only:
