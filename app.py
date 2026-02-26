@@ -132,11 +132,17 @@ def db_load():
     return res.data or []
 
 def db_insert(ticker, market):
-    row = {"ticker": ticker.upper(), **market, **{f: "" for f in USER_FIELDS}}
+    allowed = set(MARKET_FIELDS)
+    clean_market = {k: v for k, v in market.items() if k in allowed}
+    row = {"ticker": ticker.upper(), **clean_market, **{f: "" for f in USER_FIELDS}}
     return supabase.table("watchlist").insert(row).execute().data[0]
 
 def db_update_market(ticker, market):
-    supabase.table("watchlist").update(market).eq("ticker", ticker).execute()
+    # Only send fields that are actual Supabase columns
+    # and strip out any None → use None explicitly (not missing key)
+    allowed = set(MARKET_FIELDS)
+    clean = {k: v for k, v in market.items() if k in allowed}
+    supabase.table("watchlist").update(clean).eq("ticker", ticker).execute()
 
 def db_update_user_fields(ticker, fields):
     supabase.table("watchlist").update(fields).eq("ticker", ticker).execute()
