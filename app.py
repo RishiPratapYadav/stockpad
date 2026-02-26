@@ -4,7 +4,7 @@ import pandas as pd
 import requests
 from datetime import datetime
 
-st.set_page_config(page_title="StockPad", page_icon="◈", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="StockPad", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -16,15 +16,19 @@ html, body, [class*="css"] { font-family: 'IBM Plex Mono', monospace; }
 .sp-logo span { color: #3d7eff; }
 .sp-sub { font-size: 10px; color: #3a4060; letter-spacing: 4px; margin-bottom: 3px; }
 hr { border-color: #1c2030 !important; }
+section[data-testid="stSidebar"] { background: #0d0f1a; border-right: 1px solid #1e2235; }
+section[data-testid="stSidebar"] label { font-size: 12px !important; color: #8090b0 !important; }
+section[data-testid="stSidebar"] .stCheckbox label { color: #c0cce0 !important; font-size: 11px !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Supabase ──────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-
 supabase = get_supabase()
 
+# ── Finnhub ───────────────────────────────────────────────────────────────────
 FINNHUB_KEY  = st.secrets["FINNHUB_KEY"]
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
@@ -36,23 +40,12 @@ def finnhub_get(endpoint, params):
 
 SENTIMENTS = ["", "🟢 Bullish", "🔴 Bearish", "🟡 Neutral", "⚪ Watching"]
 
-MARKET_FIELDS = [
-    "name","sector","industry","price","change_pct","market_cap",
-    "pe_ratio","week52_high","week52_low","week52_return",
-    "beta","pb_ratio","ps_ratio","dividend_yield",
-    "roe","roa","debt_equity","current_ratio",
-    "gross_margin","net_margin","revenue_growth",
-    # new
-    "analyst_target_high","analyst_target_low","analyst_target_mean","analyst_target_median",
-    "analyst_strong_buy","analyst_buy","analyst_hold","analyst_sell","analyst_strong_sell",
-    "insider_mspr","insider_change_3m",
-]
+# ── Column Registry ───────────────────────────────────────────────────────────
+# Each entry: (col_label, raw_key, api_source, format_fn, col_header, width)
+# api_source: "quote" | "profile" | "metrics" | "user" | "fixed"
+# "fixed" = always shown (Ticker, Name), "user" = always shown editable fields
 
-USER_FIELDS = ["target_buy","target_sell","price_tag","price_tag_pct","sentiment","comments"]
-
-def fmt_price(v):
-    return f"${float(v):,.2f}" if v is not None else "—"
-
+def fmt_price(v):  return f"${float(v):,.2f}" if v is not None else "—"
 def fmt_cap(v):
     if not v: return "—"
     v = float(v)
@@ -60,145 +53,168 @@ def fmt_cap(v):
     if v >= 1e9:  return f"${v/1e9:.2f}B"
     if v >= 1e6:  return f"${v/1e6:.0f}M"
     return str(v)
-
-def fmt_pct(v, d=2):
+def fmt_pct(v):
     if v is None: return "—"
     sign = "+" if float(v) >= 0 else ""
-    return f"{sign}{float(v):.{d}f}%"
+    return f"{sign}{float(v):.2f}%"
+def fmt_x(v):   return f"{float(v):.2f}x" if v is not None else "—"
+def fmt_num(v): return f"{float(v):.2f}"   if v is not None else "—"
+def fmt_str(v): return str(v) if v else "—"
 
-def fmt_x(v):
-    return f"{float(v):.2f}x" if v is not None else "—"
+# Groups: (group_label, [(col_label, db_key, api_source, fmt_fn, header, width), ...])
+COLUMN_GROUPS = [
+    ("📈 Price & Market", [
+        ("Name",        "name",        "profile",  fmt_str,   "NAME",        "medium"),
+        ("Sector",      "sector",      "profile",  fmt_str,   "SECTOR",      "medium"),
+        ("Industry",    "industry",    "profile",  fmt_str,   "INDUSTRY",    "medium"),
+        ("% Change",    "change_pct",  "quote",    fmt_pct,   "% CHG",       "small"),
+        ("Mkt Cap",     "market_cap",  "profile",  fmt_str,   "MKT CAP",     "small"),
+    ]),
+    ("📊 Valuation", [
+        ("P/E Ratio",   "pe_ratio",    "metrics",  fmt_x,     "P/E",         "small"),
+        ("P/B Ratio",   "pb_ratio",    "metrics",  fmt_x,     "P/B",         "small"),
+        ("P/S Ratio",   "ps_ratio",    "metrics",  fmt_x,     "P/S",         "small"),
+    ]),
+    ("📅 52-Week", [
+        ("52W High",    "week52_high", "metrics",  fmt_price, "52W HIGH",    "small"),
+        ("52W Low",     "week52_low",  "metrics",  fmt_price, "52W LOW",     "small"),
+        ("52W Return",  "week52_return","metrics", fmt_pct,   "52W RETURN",  "small"),
+    ]),
+    ("⚖️ Risk", [
+        ("Beta",        "beta",        "metrics",  fmt_num,   "BETA",        "small"),
+        ("Debt/Equity", "debt_equity", "metrics",  fmt_num,   "DEBT/EQ",     "small"),
+        ("Curr Ratio",  "current_ratio","metrics", fmt_num,   "CURR RATIO",  "small"),
+    ]),
+    ("💰 Income & Returns", [
+        ("Div Yield",   "dividend_yield","metrics",fmt_pct,   "DIV YIELD",   "small"),
+        ("ROE",         "roe",         "metrics",  fmt_pct,   "ROE",         "small"),
+        ("ROA",         "roa",         "metrics",  fmt_pct,   "ROA",         "small"),
+        ("Gross Margin","gross_margin","metrics",  fmt_pct,   "GROSS MARGIN","small"),
+        ("Net Margin",  "net_margin",  "metrics",  fmt_pct,   "NET MARGIN",  "small"),
+        ("Rev Growth",  "revenue_growth","metrics",fmt_pct,   "REV GROWTH",  "small"),
+    ]),
+    ("📝 My Notes", [
+        ("Buy Target",  "target_buy",  "user",     fmt_str,   "BUY TARGET 🎯","small"),
+        ("Sell Target", "target_sell", "user",     fmt_str,   "SELL TARGET 🎯","small"),
+        ("Price Tag",   "price_tag",   "user",     fmt_str,   "PRICE TAG 🏷️","small"),
+        ("Tag %",       "price_tag_pct","user",    fmt_str,   "TAG % 📊",    "small"),
+        ("Sentiment",   "sentiment",   "user",     fmt_str,   "SENTIMENT 🧭","medium"),
+        ("Comments",    "comments",    "user",     fmt_str,   "COMMENTS 📝", "large"),
+    ]),
+]
 
-def fmt_num(v):
-    return f"{float(v):.2f}" if v is not None else "—"
+# Flat lookup: col_label → (db_key, api_source, fmt_fn, header, width)
+COL_REGISTRY = {
+    col: (db_key, src, fn, hdr, w)
+    for _, grp in COLUMN_GROUPS
+    for col, db_key, src, fn, hdr, w in grp
+}
 
-def analyst_consensus(strong_buy, buy, hold, sell, strong_sell):
-    """Return a short consensus label from analyst recommendation counts."""
-    total = (strong_buy or 0) + (buy or 0) + (hold or 0) + (sell or 0) + (strong_sell or 0)
-    if total == 0: return "—"
-    bullish = (strong_buy or 0) + (buy or 0)
-    bearish = (sell or 0) + (strong_sell or 0)
-    ratio = bullish / total
-    if ratio >= 0.7:   return "💪 Strong Buy"
-    elif ratio >= 0.5: return "👍 Buy"
-    elif bearish / total >= 0.5: return "👎 Sell"
-    else:              return "✋ Hold"
+MARKET_FIELDS = [
+    "name","sector","industry","price","change_pct","market_cap",
+    "pe_ratio","week52_high","week52_low","week52_return",
+    "beta","pb_ratio","ps_ratio","dividend_yield",
+    "roe","roa","debt_equity","current_ratio",
+    "gross_margin","net_margin","revenue_growth",
+]
+USER_FIELDS = ["target_buy","target_sell","price_tag","price_tag_pct","sentiment","comments"]
 
+# ── Sidebar: Column Selector ──────────────────────────────────────────────────
+st.sidebar.markdown("## ◈ STOCKPAD")
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📋 Columns")
+st.sidebar.caption("Price is always shown. Toggle others:")
+
+# Default: all market columns ON, all user columns ON
+if "selected_cols" not in st.session_state:
+    st.session_state.selected_cols = {
+        col: True
+        for _, grp in COLUMN_GROUPS
+        for col, *_ in grp
+    }
+
+selected_cols = st.session_state.selected_cols
+
+for group_label, group_cols in COLUMN_GROUPS:
+    st.sidebar.markdown(f"**{group_label}**")
+    # Group select-all toggle
+    all_on = all(selected_cols.get(col, True) for col, *_ in group_cols)
+    grp_key = f"grp_{group_label}"
+    if st.sidebar.checkbox(f"All {group_label.split(' ',1)[1]}", value=all_on, key=grp_key):
+        for col, *_ in group_cols:
+            selected_cols[col] = True
+    else:
+        for col, *_ in group_cols:
+            selected_cols[col] = False
+    # Individual checkboxes
+    for col, db_key, src, fn, hdr, w in group_cols:
+        selected_cols[col] = st.sidebar.checkbox(
+            col, value=selected_cols.get(col, True), key=f"col_{col}"
+        )
+    st.sidebar.markdown("")
+
+# Which API sources are actually needed?
+needed_sources = {"quote", "profile"}  # quote always needed for price validation; profile for name
+for col, (db_key, src, fn, hdr, w) in COL_REGISTRY.items():
+    if selected_cols.get(col) and src not in ("user","fixed"):
+        needed_sources.add(src)
+
+st.sidebar.markdown("---")
+st.sidebar.caption(f"API calls per stock: {len(needed_sources - {'user','fixed'})}")
+
+# ── Fetch function ─────────────────────────────────────────────────────────────
 def fetch_market_data(ticker):
     try:
         t = ticker.upper()
+        result = {}
 
+        # 1. Quote (always — needed for price + validation) ───────────────────
         quote = finnhub_get("quote", {"symbol": t})
         price = quote.get("c")
         prev  = quote.get("pc")
         if not price or price == 0:
             st.error(f"Ticker **{t}** not found on Finnhub.")
             return None
-        chg = round(((price - prev) / prev) * 100, 2) if prev else None
+        result["price"]      = round(float(price), 2)
+        result["change_pct"] = round(((price - prev) / prev) * 100, 2) if prev else None
 
-        profile = finnhub_get("stock/profile2", {"symbol": t})
-        name     = profile.get("name") or t
-        # Finnhub uses 'finnhubIndustry' for industry; sector comes from ggroup/gcategory
-        industry = profile.get("finnhubIndustry") or "—"
-        sector   = profile.get("ggroup") or profile.get("gcategory") or profile.get("gind") or "—"
-        mktcap   = profile.get("marketCapitalization")
+        # 2. Profile (always — needed for name) ───────────────────────────────
+        profile  = finnhub_get("stock/profile2", {"symbol": t})
+        result["name"]       = profile.get("name") or t
+        result["industry"]   = profile.get("finnhubIndustry") or "—"
+        result["sector"]     = profile.get("ggroup") or profile.get("gcategory") or "—"
+        result["market_cap"] = fmt_cap((profile.get("marketCapitalization") or 0) * 1_000_000) or None
 
-        # Debug: show raw profile keys in sidebar (remove after confirming)
-        with st.sidebar.expander(f"🔍 Debug: {t} profile keys", expanded=False):
-            st.json({k: v for k, v in profile.items() if v})
+        # 3. Metrics (only if any metrics column is selected) ─────────────────
+        if "metrics" in needed_sources:
+            metrics_resp = finnhub_get("stock/metric", {"symbol": t, "metric": "all"})
+            m = metrics_resp.get("metric", {})
+            def safe(key, fallbacks=None):
+                v = m.get(key)
+                if v is None and fallbacks:
+                    for k in fallbacks:
+                        v = m.get(k)
+                        if v is not None: break
+                return round(float(v), 4) if v is not None else None
 
-        metrics_resp = finnhub_get("stock/metric", {"symbol": t, "metric": "all"})
-        m = metrics_resp.get("metric", {})
+            result["pe_ratio"]      = safe("peBasicExclExtraTTM", ["peTTM"])
+            result["pb_ratio"]      = safe("pbAnnual", ["pbQuarterly"])
+            result["ps_ratio"]      = safe("psAnnual", ["psTTM"])
+            result["week52_high"]   = safe("52WeekHigh")
+            result["week52_low"]    = safe("52WeekLow")
+            result["week52_return"] = safe("52WeekPriceReturnDaily")
+            result["beta"]          = safe("beta")
+            result["debt_equity"]   = safe("totalDebt/totalEquityAnnual", ["totalDebt/totalEquityQuarterly"])
+            result["current_ratio"] = safe("currentRatioAnnual", ["currentRatioQuarterly"])
+            result["dividend_yield"]= safe("dividendYieldIndicatedAnnual")
+            result["roe"]           = safe("roeTTM", ["roeRfy"])
+            result["roa"]           = safe("roaTTM", ["roaRfy"])
+            result["gross_margin"]  = safe("grossMarginTTM", ["grossMarginAnnual"])
+            result["net_margin"]    = safe("netProfitMarginTTM", ["netProfitMarginAnnual"])
+            result["revenue_growth"]= safe("revenueGrowthTTMYoy", ["revenueGrowth3Y"])
 
-        def safe(key, fallbacks=None):
-            v = m.get(key)
-            if v is None and fallbacks:
-                for k in fallbacks:
-                    v = m.get(k)
-                    if v is not None: break
-            return round(float(v), 4) if v is not None else None
+        return result
 
-        # 4. Price target ─────────────────────────────────────────────────────
-        pt = finnhub_get("stock/price-target", {"symbol": t})
-        with st.sidebar.expander(f"🔍 Debug: {t} price-target", expanded=False):
-            st.json(pt)
-        target_high   = round(float(pt["targetHigh"]),   2) if pt.get("targetHigh")   else None
-        target_low    = round(float(pt["targetLow"]),    2) if pt.get("targetLow")    else None
-        target_mean   = round(float(pt["targetMean"]),   2) if pt.get("targetMean")   else None
-        target_median = round(float(pt["targetMedian"]), 2) if pt.get("targetMedian") else None
-
-        # 5. Analyst recommendations (latest period) ──────────────────────────
-        rec_resp = finnhub_get("stock/recommendation", {"symbol": t})
-        with st.sidebar.expander(f"🔍 Debug: {t} recommendation", expanded=False):
-            st.json(rec_resp[:2] if rec_resp else [])
-        if rec_resp and len(rec_resp) > 0:
-            latest = rec_resp[0]
-            a_sb = latest.get("strongBuy",  0)
-            a_b  = latest.get("buy",        0)
-            a_h  = latest.get("hold",       0)
-            a_s  = latest.get("sell",       0)
-            a_ss = latest.get("strongSell", 0)
-        else:
-            a_sb = a_b = a_h = a_s = a_ss = None
-
-        # 6. Insider transactions — net share change last 90 days ─────────────
-        from datetime import date, timedelta
-        date_to   = date.today().isoformat()
-        date_from = (date.today() - timedelta(days=90)).isoformat()
-        insider_resp = finnhub_get("stock/insider-transactions", {
-            "symbol": t, "from": date_from, "to": date_to
-        })
-        with st.sidebar.expander(f"🔍 Debug: {t} insider-transactions", expanded=False):
-            st.json((insider_resp.get("data") or [])[:3])
-        insider_change_3m = None
-        if insider_resp and insider_resp.get("data"):
-            insider_change_3m = sum(tx.get("change", 0) or 0 for tx in insider_resp["data"])
-
-        # 7. Insider sentiment — avg MSPR last 90 days ────────────────────────
-        mspr_resp = finnhub_get("stock/insider-sentiment", {
-            "symbol": t, "from": date_from, "to": date_to
-        })
-        with st.sidebar.expander(f"🔍 Debug: {t} insider-sentiment", expanded=False):
-            st.json(mspr_resp)
-        mspr = None
-        if mspr_resp and mspr_resp.get("data"):
-            vals = [d.get("mspr") for d in mspr_resp["data"] if d.get("mspr") is not None]
-            mspr = round(sum(vals) / len(vals), 4) if vals else None
-
-        return {
-            "name":                  name,
-            "sector":                sector,
-            "industry":              industry,
-            "price":                 round(float(price), 2),
-            "change_pct":            chg,
-            "market_cap":            fmt_cap(mktcap * 1_000_000) if mktcap else None,
-            "pe_ratio":              safe("peBasicExclExtraTTM", ["peTTM"]),
-            "week52_high":           safe("52WeekHigh"),
-            "week52_low":            safe("52WeekLow"),
-            "week52_return":         safe("52WeekPriceReturnDaily"),
-            "beta":                  safe("beta"),
-            "pb_ratio":              safe("pbAnnual", ["pbQuarterly"]),
-            "ps_ratio":              safe("psAnnual", ["psTTM"]),
-            "dividend_yield":        safe("dividendYieldIndicatedAnnual"),
-            "roe":                   safe("roeTTM", ["roeRfy"]),
-            "roa":                   safe("roaTTM", ["roaRfy"]),
-            "debt_equity":           safe("totalDebt/totalEquityAnnual", ["totalDebt/totalEquityQuarterly"]),
-            "current_ratio":         safe("currentRatioAnnual", ["currentRatioQuarterly"]),
-            "gross_margin":          safe("grossMarginTTM", ["grossMarginAnnual"]),
-            "net_margin":            safe("netProfitMarginTTM", ["netProfitMarginAnnual"]),
-            "revenue_growth":        safe("revenueGrowthTTMYoy", ["revenueGrowth3Y"]),
-            "analyst_target_high":   target_high,
-            "analyst_target_low":    target_low,
-            "analyst_target_mean":   target_mean,
-            "analyst_target_median": target_median,
-            "analyst_strong_buy":    a_sb,
-            "analyst_buy":           a_b,
-            "analyst_hold":          a_h,
-            "analyst_sell":          a_s,
-            "analyst_strong_sell":   a_ss,
-            "insider_mspr":          mspr,
-            "insider_change_3m":     insider_change_3m,
-        }
     except requests.exceptions.HTTPError as e:
         st.error(f"Finnhub API error for **{ticker}**: {e}")
         return None
@@ -206,21 +222,19 @@ def fetch_market_data(ticker):
         st.error(f"Error fetching **{ticker}**: {e}")
         return None
 
+# ── Supabase CRUD ─────────────────────────────────────────────────────────────
 def db_load():
-    res = supabase.table("watchlist").select("*").order("created_at").execute()
-    return res.data or []
+    return supabase.table("watchlist").select("*").order("created_at").execute().data or []
 
 def db_insert(ticker, market):
     allowed = set(MARKET_FIELDS)
-    clean_market = {k: v for k, v in market.items() if k in allowed}
-    row = {"ticker": ticker.upper(), **clean_market, **{f: "" for f in USER_FIELDS}}
+    clean   = {k: v for k, v in market.items() if k in allowed}
+    row     = {"ticker": ticker.upper(), **clean, **{f: "" for f in USER_FIELDS}}
     return supabase.table("watchlist").insert(row).execute().data[0]
 
 def db_update_market(ticker, market):
-    # Only send fields that are actual Supabase columns
-    # and strip out any None → use None explicitly (not missing key)
     allowed = set(MARKET_FIELDS)
-    clean = {k: v for k, v in market.items() if k in allowed}
+    clean   = {k: v for k, v in market.items() if k in allowed}
     supabase.table("watchlist").update(clean).eq("ticker", ticker).execute()
 
 def db_update_user_fields(ticker, fields):
@@ -229,6 +243,7 @@ def db_update_user_fields(ticker, fields):
 def db_delete(ticker):
     supabase.table("watchlist").delete().eq("ticker", ticker).execute()
 
+# ── Session state ─────────────────────────────────────────────────────────────
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = {r["ticker"]: r for r in db_load()}
 if "last_refresh" not in st.session_state:
@@ -236,6 +251,7 @@ if "last_refresh" not in st.session_state:
 
 wl = st.session_state.watchlist
 
+# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown('<div><div class="sp-logo"><span>◈</span> STOCKPAD</div><div class="sp-sub">LIGHTWEIGHT STOCK TRACKER · FINNHUB + SUPABASE</div></div>', unsafe_allow_html=True)
 st.markdown("---")
 
@@ -243,7 +259,7 @@ total   = len(wl)
 gainers = sum(1 for r in wl.values() if (r.get("change_pct") or 0) > 0)
 losers  = sum(1 for r in wl.values() if (r.get("change_pct") or 0) < 0)
 
-c1,c2,c3,c4 = st.columns([1,1,1,2])
+c1, c2, c3, c4 = st.columns([1,1,1,2])
 with c1: st.metric("📊 Tracked", total)
 with c2: st.metric("🟢 Gainers", gainers)
 with c3: st.metric("🔴 Losers",  losers)
@@ -251,9 +267,11 @@ with c4: st.caption(f"Last refresh: {st.session_state.last_refresh or '—'}")
 
 st.divider()
 
+# ── Toolbar ───────────────────────────────────────────────────────────────────
 col_inp, col_add, col_ref, _ = st.columns([2,1,1,4])
 with col_inp:
-    new_ticker = st.text_input("", placeholder="Enter ticker e.g. AAPL", label_visibility="collapsed", key="ticker_input")
+    new_ticker = st.text_input("", placeholder="Enter ticker e.g. AAPL",
+                               label_visibility="collapsed", key="ticker_input")
 with col_add:
     add_clicked = st.button("＋ Add Stock", use_container_width=True, type="primary")
 with col_ref:
@@ -286,271 +304,132 @@ if refresh_clicked and wl:
 
 st.divider()
 
+# ── Build active column list (always: Ticker + Price, then selected) ──────────
+ALWAYS_COLS = ["Ticker", "Price"]   # mandatory, never toggled off
+active_market_cols = [
+    col for col, (db_key, src, fn, hdr, w) in COL_REGISTRY.items()
+    if src != "user" and selected_cols.get(col, True)
+]
+active_user_cols = [
+    col for col, (db_key, src, fn, hdr, w) in COL_REGISTRY.items()
+    if src == "user" and selected_cols.get(col, True)
+]
+all_active_cols = ALWAYS_COLS + [c for c in active_market_cols if c not in ALWAYS_COLS] + active_user_cols
+
+# ── Main table ────────────────────────────────────────────────────────────────
 if not wl:
     st.markdown('<div style="text-align:center;padding:80px 20px;color:#2d3148;"><div style="font-size:48px;margin-bottom:16px;">◈</div><div style="font-size:14px;letter-spacing:3px;">ADD YOUR FIRST STOCK ABOVE</div></div>', unsafe_allow_html=True)
 else:
-    # ── Build raw numeric dataframe (for sort/filter) ─────────────────────────
+    # Build raw df for sort/filter (numeric values)
     raw_rows = []
     for t, r in wl.items():
-        raw_rows.append({
-            "_ticker":        r["ticker"],
-            "Ticker":         r["ticker"],
-            "Name":           r.get("name") or "—",
-            "Sector":         r.get("sector") or "—",
-            "Industry":       r.get("industry") or "—",
-            # numeric cols (raw) for sort/filter
-            "_price":         r.get("price"),
-            "_change_pct":    r.get("change_pct"),
-            "_pe":            r.get("pe_ratio"),
-            "_pb":            r.get("pb_ratio"),
-            "_ps":            r.get("ps_ratio"),
-            "_52wh":          r.get("week52_high"),
-            "_52wl":          r.get("week52_low"),
-            "_52wr":          r.get("week52_return"),
-            "_beta":          r.get("beta"),
-            "_de":            r.get("debt_equity"),
-            "_cr":            r.get("current_ratio"),
-            "_dy":            r.get("dividend_yield"),
-            "_roe":           r.get("roe"),
-            "_roa":           r.get("roa"),
-            "_gm":            r.get("gross_margin"),
-            "_nm":            r.get("net_margin"),
-            "_rg":            r.get("revenue_growth"),
-            "_insider_mspr":          r.get("insider_mspr"),
-            "_insider_change_3m":     r.get("insider_change_3m"),
-            "_analyst_target_mean":   r.get("analyst_target_mean"),
-            "_analyst_target_median": r.get("analyst_target_median"),
-            "_analyst_target_high":   r.get("analyst_target_high"),
-            "_analyst_target_low":    r.get("analyst_target_low"),
-            "_analyst_sb":            r.get("analyst_strong_buy"),
-            "_analyst_b":             r.get("analyst_buy"),
-            "_analyst_h":             r.get("analyst_hold"),
-            "_analyst_s":             r.get("analyst_sell"),
-            "_analyst_ss":            r.get("analyst_strong_sell"),
-            # user fields
-            "Buy Target":     r.get("target_buy")    or "",
-            "Sell Target":    r.get("target_sell")   or "",
-            "Price Tag":      r.get("price_tag")     or "",
-            "Tag %":          r.get("price_tag_pct") or "",
-            "Sentiment":      r.get("sentiment")     or "",
-            "Comments":       r.get("comments")      or "",
-        })
-
+        row = {"Ticker": r["ticker"], "_price": r.get("price"), "_change_pct": r.get("change_pct")}
+        for col, (db_key, src, fn, hdr, w) in COL_REGISTRY.items():
+            row[f"_{db_key}"] = r.get(db_key)
+        # user fields without underscore prefix (for editing)
+        for col, (db_key, src, fn, hdr, w) in COL_REGISTRY.items():
+            if src == "user":
+                row[col] = r.get(db_key) or ""
+        raw_rows.append(row)
     raw_df = pd.DataFrame(raw_rows)
 
-    # ── Sort & Filter Controls ────────────────────────────────────────────────
+    # ── Sort & Filter expander ────────────────────────────────────────────────
     with st.expander("🔍 Sort & Filter", expanded=False):
         fc1, fc2, fc3 = st.columns(3)
         fc4, fc5, fc6 = st.columns(3)
 
-        # Text filters
         with fc1:
             f_ticker = st.text_input("Ticker contains", key="f_ticker", placeholder="e.g. AA").upper()
         with fc2:
-            all_industries = ["All"] + sorted(raw_df["Industry"].dropna().unique().tolist())
-            f_industry = st.selectbox("Industry", all_industries, key="f_industry")
+            industries = ["All"] + sorted(set(r.get("industry") or "—" for r in wl.values()))
+            f_industry = st.selectbox("Industry", industries, key="f_industry")
         with fc3:
-            all_sentiments = ["All"] + [s for s in SENTIMENTS if s]
-            f_sentiment = st.selectbox("Sentiment", all_sentiments, key="f_sent")
-
-        # Numeric filters
+            f_sentiment = st.selectbox("Sentiment", ["All"] + [s for s in SENTIMENTS if s], key="f_sent")
         with fc4:
-            f_chg_min, f_chg_max = st.slider(
-                "% Change range", min_value=-20.0, max_value=20.0,
-                value=(-20.0, 20.0), step=0.5, key="f_chg"
-            )
+            f_chg_min, f_chg_max = st.slider("% Change range", -20.0, 20.0, (-20.0, 20.0), 0.5, key="f_chg")
         with fc5:
-            numeric_sort_cols = {
+            sort_opts = {
                 "Default (add order)": None,
-                "Ticker (A→Z)":       ("Ticker", True),
-                "Price ↑":            ("_price", True),
-                "Price ↓":            ("_price", False),
-                "% Change ↑":         ("_change_pct", True),
-                "% Change ↓":         ("_change_pct", False),
-                "P/E ↑":              ("_pe", True),
-                "P/E ↓":              ("_pe", False),
-                "Mkt Cap ↑":          ("_price", True),
-                "52W Return ↑":       ("_52wr", True),
-                "52W Return ↓":       ("_52wr", False),
-                "Beta ↑":             ("_beta", True),
-                "Beta ↓":             ("_beta", False),
-                "ROE ↑":              ("_roe", True),
-                "ROE ↓":              ("_roe", False),
-                "Net Margin ↑":       ("_nm", True),
-                "Net Margin ↓":       ("_nm", False),
-                "Rev Growth ↑":       ("_rg", True),
-                "Rev Growth ↓":       ("_rg", False),
-                "Div Yield ↑":        ("_dy", True),
-                "Div Yield ↓":        ("_dy", False),
+                "Ticker A→Z": ("Ticker", True),
+                "Price ↑": ("_price", True), "Price ↓": ("_price", False),
+                "% Change ↑": ("_change_pct", True), "% Change ↓": ("_change_pct", False),
+                "P/E ↑": ("_pe_ratio", True), "P/E ↓": ("_pe_ratio", False),
+                "52W Return ↑": ("_week52_return", True), "52W Return ↓": ("_week52_return", False),
+                "Beta ↑": ("_beta", True), "Beta ↓": ("_beta", False),
+                "ROE ↑": ("_roe", True), "ROE ↓": ("_roe", False),
+                "Net Margin ↑": ("_net_margin", True), "Net Margin ↓": ("_net_margin", False),
+                "Rev Growth ↑": ("_revenue_growth", True), "Rev Growth ↓": ("_revenue_growth", False),
+                "Div Yield ↑": ("_dividend_yield", True), "Div Yield ↓": ("_dividend_yield", False),
             }
-            sort_choice = st.selectbox("Sort by", list(numeric_sort_cols.keys()), key="f_sort")
+            sort_choice = st.selectbox("Sort by", list(sort_opts.keys()), key="f_sort")
         with fc6:
-            f_gainers_only = st.checkbox("Gainers only 🟢", key="f_gain")
-            f_losers_only  = st.checkbox("Losers only 🔴",  key="f_loss")
+            f_gainers = st.checkbox("Gainers only 🟢", key="f_gain")
+            f_losers  = st.checkbox("Losers only 🔴",  key="f_loss")
 
-    # ── Apply filters ─────────────────────────────────────────────────────────
+    # Apply filters
     mask = pd.Series([True] * len(raw_df), index=raw_df.index)
+    if f_ticker:    mask &= raw_df["Ticker"].str.contains(f_ticker, case=False, na=False)
+    if f_industry != "All": mask &= raw_df["_industry"].fillna("—") == f_industry
+    if f_sentiment != "All": mask &= raw_df["Sentiment"].fillna("") == f_sentiment
+    if f_gainers:   mask &= raw_df["_change_pct"].fillna(0) > 0
+    if f_losers:    mask &= raw_df["_change_pct"].fillna(0) < 0
+    mask &= raw_df["_change_pct"].fillna(0).between(f_chg_min, f_chg_max)
+    filtered = raw_df[mask].copy()
 
-    if f_ticker:
-        mask &= raw_df["Ticker"].str.contains(f_ticker, case=False, na=False)
-    if f_industry != "All":
-        mask &= raw_df["Industry"] == f_industry
-    if f_sentiment != "All":
-        mask &= raw_df["Sentiment"] == f_sentiment
-    if f_gainers_only:
-        mask &= raw_df["_change_pct"].fillna(0) > 0
-    if f_losers_only:
-        mask &= raw_df["_change_pct"].fillna(0) < 0
+    # Apply sort
+    sv = sort_opts[sort_choice]
+    if sv:
+        filtered = filtered.sort_values(by=sv[0], ascending=sv[1], na_position="last")
 
-    # % change slider filter
-    mask &= (
-        raw_df["_change_pct"].fillna(0).between(f_chg_min, f_chg_max)
-    )
-
-    filtered_df = raw_df[mask].copy()
-
-    # ── Apply sort ────────────────────────────────────────────────────────────
-    sort_val = numeric_sort_cols[sort_choice]
-    if sort_val:
-        col_key, ascending = sort_val
-        filtered_df = filtered_df.sort_values(
-            by=col_key, ascending=ascending, na_position="last"
-        )
-
-    # ── Build display dataframe (formatted strings) ───────────────────────────
+    # Build display df with only active columns, formatted
     display_rows = []
-    for _, r in filtered_df.iterrows():
-        display_rows.append({
-            "Ticker":       r["Ticker"],
-            "Name":         r["Name"],
-            "Sector":       r["Sector"],
-            "Industry":     r["Industry"],
-            "Price":        fmt_price(r["_price"]),
-            "% Chg":        fmt_pct(r["_change_pct"]),
-            "P/E":          fmt_x(r["_pe"]),
-            "P/B":          fmt_x(r["_pb"]),
-            "P/S":          fmt_x(r["_ps"]),
-            "52W High":     fmt_price(r["_52wh"]),
-            "52W Low":      fmt_price(r["_52wl"]),
-            "52W Return":   fmt_pct(r["_52wr"]),
-            "Beta":         fmt_num(r["_beta"]),
-            "Debt/Equity":  fmt_num(r["_de"]),
-            "Curr Ratio":   fmt_num(r["_cr"]),
-            "Div Yield":    fmt_pct(r["_dy"]),
-            "ROE":          fmt_pct(r["_roe"]),
-            "ROA":          fmt_pct(r["_roa"]),
-            "Gross Margin": fmt_pct(r["_gm"]),
-            "Net Margin":   fmt_pct(r["_nm"]),
-            "Rev Growth":   fmt_pct(r["_rg"]),
-            # Analyst price targets
-            "Tgt Mean":     fmt_price(r["_analyst_target_mean"]),
-            "Tgt Median":   fmt_price(r["_analyst_target_median"]),
-            "Tgt High":     fmt_price(r["_analyst_target_high"]),
-            "Tgt Low":      fmt_price(r["_analyst_target_low"]),
-            # Analyst consensus
-            "Consensus":    analyst_consensus(r["_analyst_sb"],r["_analyst_b"],r["_analyst_h"],r["_analyst_s"],r["_analyst_ss"]),
-            "💪 SB":        int(r["_analyst_sb"]) if r["_analyst_sb"] is not None else "—",
-            "👍 B":         int(r["_analyst_b"])  if r["_analyst_b"]  is not None else "—",
-            "✋ H":         int(r["_analyst_h"])  if r["_analyst_h"]  is not None else "—",
-            "👎 S":         int(r["_analyst_s"])  if r["_analyst_s"]  is not None else "—",
-            "🚫 SS":        int(r["_analyst_ss"]) if r["_analyst_ss"] is not None else "—",
-            # Insider data
-            "Insider MSPR": fmt_num(r["_insider_mspr"]),
-            "Insider Δ 3M": f"{int(r['_insider_change_3m']):+,}" if r["_insider_change_3m"] is not None else "—",
-            "Buy Target":   r["Buy Target"],
-            "Sell Target":  r["Sell Target"],
-            "Price Tag":    r["Price Tag"],
-            "Tag %":        r["Tag %"],
-            "Sentiment":    r["Sentiment"],
-            "Comments":     r["Comments"],
-        })
+    for _, r in filtered.iterrows():
+        dr = {"Ticker": r["Ticker"], "Price": fmt_price(r["_price"])}
+        for col in active_market_cols:
+            if col in ("Ticker", "Price"): continue
+            db_key, src, fn, hdr, w = COL_REGISTRY[col]
+            dr[col] = fn(r.get(f"_{db_key}"))
+        for col in active_user_cols:
+            dr[col] = r.get(col, "")
+        display_rows.append(dr)
 
-    NEW_COLS = ["Tgt Mean","Tgt Median","Tgt High","Tgt Low",
-                "Consensus","💪 SB","👍 B","✋ H","👎 S","🚫 SS",
-                "Insider MSPR","Insider Δ 3M"]
+    display_df = pd.DataFrame(display_rows) if display_rows else pd.DataFrame(columns=all_active_cols)
 
-    display_df = pd.DataFrame(display_rows) if display_rows else pd.DataFrame(
-        columns=["Ticker","Name","Sector","Industry","Price","% Chg",
-                 "P/E","P/B","P/S","52W High","52W Low","52W Return",
-                 "Beta","Debt/Equity","Curr Ratio","Div Yield",
-                 "ROE","ROA","Gross Margin","Net Margin","Rev Growth",
-                 *NEW_COLS,
-                 "Buy Target","Sell Target","Price Tag","Tag %","Sentiment","Comments"]
-    )
+    st.caption(f"Showing {len(display_df)} of {len(wl)} stocks  ·  {len(all_active_cols)} columns active")
 
-    # Show filtered count
-    st.caption(f"Showing {len(display_df)} of {len(wl)} stocks")
+    # Build column_config and DISABLED list dynamically
+    user_col_set = {col for col, (_, src, *_) in COL_REGISTRY.items() if src == "user"}
+    DISABLED = [c for c in display_df.columns if c not in user_col_set]
 
-    DISABLED = ["Ticker","Name","Sector","Industry","Price","% Chg",
-                "P/E","P/B","P/S","52W High","52W Low","52W Return",
-                "Beta","Debt/Equity","Curr Ratio","Div Yield",
-                "ROE","ROA","Gross Margin","Net Margin","Rev Growth",
-                *NEW_COLS]
+    col_cfg = {
+        "Ticker": st.column_config.TextColumn("TICKER", width="small"),
+        "Price":  st.column_config.TextColumn("PRICE",  width="small"),
+    }
+    for col in all_active_cols:
+        if col in ("Ticker", "Price"): continue
+        db_key, src, fn, hdr, w = COL_REGISTRY[col]
+        if col == "Sentiment":
+            col_cfg[col] = st.column_config.SelectboxColumn(hdr, width=w, options=SENTIMENTS)
+        else:
+            col_cfg[col] = st.column_config.TextColumn(hdr, width=w)
 
     edited_df = st.data_editor(
-        display_df, use_container_width=True, hide_index=True, disabled=DISABLED,
-        column_config={
-            "Ticker":        st.column_config.TextColumn("TICKER",         width="small"),
-            "Name":          st.column_config.TextColumn("NAME",           width="medium"),
-            "Sector":        st.column_config.TextColumn("SECTOR",         width="medium"),
-            "Industry":      st.column_config.TextColumn("INDUSTRY",       width="medium"),
-            "Price":         st.column_config.TextColumn("PRICE",          width="small"),
-            "% Chg":         st.column_config.TextColumn("% CHG",          width="small"),
-            "P/E":           st.column_config.TextColumn("P/E",            width="small"),
-            "P/B":           st.column_config.TextColumn("P/B",            width="small"),
-            "P/S":           st.column_config.TextColumn("P/S",            width="small"),
-            "52W High":      st.column_config.TextColumn("52W HIGH",       width="small"),
-            "52W Low":       st.column_config.TextColumn("52W LOW",        width="small"),
-            "52W Return":    st.column_config.TextColumn("52W RETURN",     width="small"),
-            "Beta":          st.column_config.TextColumn("BETA",           width="small"),
-            "Debt/Equity":   st.column_config.TextColumn("DEBT/EQ",        width="small"),
-            "Curr Ratio":    st.column_config.TextColumn("CURR RATIO",     width="small"),
-            "Div Yield":     st.column_config.TextColumn("DIV YIELD",      width="small"),
-            "ROE":           st.column_config.TextColumn("ROE",            width="small"),
-            "ROA":           st.column_config.TextColumn("ROA",            width="small"),
-            "Gross Margin":  st.column_config.TextColumn("GROSS MARGIN",   width="small"),
-            "Net Margin":    st.column_config.TextColumn("NET MARGIN",      width="small"),
-            "Rev Growth":    st.column_config.TextColumn("REV GROWTH",     width="small"),
-            # Analyst targets
-            "Tgt Mean":      st.column_config.TextColumn("TGT MEAN 🎯",    width="small"),
-            "Tgt Median":    st.column_config.TextColumn("TGT MEDIAN 🎯",  width="small"),
-            "Tgt High":      st.column_config.TextColumn("TGT HIGH ⬆",     width="small"),
-            "Tgt Low":       st.column_config.TextColumn("TGT LOW ⬇",      width="small"),
-            # Analyst consensus
-            "Consensus":     st.column_config.TextColumn("CONSENSUS 📊",   width="medium"),
-            "💪 SB":         st.column_config.TextColumn("💪 STR BUY",     width="small"),
-            "👍 B":          st.column_config.TextColumn("👍 BUY",         width="small"),
-            "✋ H":          st.column_config.TextColumn("✋ HOLD",        width="small"),
-            "👎 S":          st.column_config.TextColumn("👎 SELL",        width="small"),
-            "🚫 SS":         st.column_config.TextColumn("🚫 STR SELL",    width="small"),
-            # Insider
-            "Insider MSPR":  st.column_config.TextColumn("INSIDER MSPR",   width="small"),
-            "Insider Δ 3M":  st.column_config.TextColumn("INSIDER Δ 3M",   width="small"),
-            # User fields
-            "Buy Target":    st.column_config.TextColumn("BUY TARGET 🎯",  width="small"),
-            "Sell Target":   st.column_config.TextColumn("SELL TARGET 🎯", width="small"),
-            "Price Tag":     st.column_config.TextColumn("PRICE TAG 🏷️",   width="small"),
-            "Tag %":         st.column_config.TextColumn("TAG % 📊",       width="small"),
-            "Sentiment":     st.column_config.SelectboxColumn("SENTIMENT 🧭", width="medium", options=SENTIMENTS),
-            "Comments":      st.column_config.TextColumn("COMMENTS 📝",    width="large"),
-        },
+        display_df, use_container_width=True, hide_index=True,
+        disabled=DISABLED, column_config=col_cfg,
         key="main_editor", num_rows="fixed",
     )
 
-    # ── Save user edits back to Supabase ──────────────────────────────────────
-    # Map display rows back to tickers using Ticker column
-    for i, row in edited_df.iterrows():
+    # Save user edits
+    for _, row in edited_df.iterrows():
         t = row["Ticker"]
-        if t not in wl:
-            continue
+        if t not in wl: continue
         existing = wl[t]
         changed = {}
-        for field, col in [("target_buy","Buy Target"),("target_sell","Sell Target"),
-                           ("price_tag","Price Tag"),("price_tag_pct","Tag %"),
-                           ("sentiment","Sentiment"),("comments","Comments")]:
-            new_val = str(row[col]) if row[col] else ""
-            if new_val != (existing.get(field) or ""):
-                changed[field] = new_val
+        for col in active_user_cols:
+            db_key, src, fn, hdr, w = COL_REGISTRY[col]
+            new_val = str(row.get(col, "")) if row.get(col) else ""
+            if new_val != (existing.get(db_key) or ""):
+                changed[db_key] = new_val
         if changed:
             db_update_user_fields(t, changed)
             wl[t].update(changed)
@@ -558,9 +437,9 @@ else:
     st.divider()
     st.markdown("##### Manage Stocks")
     all_tickers = list(wl.keys())
-    cols = st.columns(min(len(all_tickers), 8))
+    del_cols = st.columns(min(len(all_tickers), 8))
     for i, t in enumerate(all_tickers):
-        with cols[i % 8]:
+        with del_cols[i % 8]:
             if st.button(f"✕ {t}", key=f"del_{t}"):
                 db_delete(t)
                 del wl[t]
@@ -572,4 +451,4 @@ else:
                        file_name=f"stockpad_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                        mime="text/csv")
 
-st.markdown('<div style="margin-top:40px;padding-top:12px;border-top:1px solid #1c2030;font-size:10px;color:#2d3148;letter-spacing:2px;text-align:center;">STOCKPAD v0.5 · STREAMLIT + FINNHUB + SUPABASE</div>', unsafe_allow_html=True)
+st.markdown('<div style="margin-top:40px;padding-top:12px;border-top:1px solid #1c2030;font-size:10px;color:#2d3148;letter-spacing:2px;text-align:center;">STOCKPAD v0.6 · STREAMLIT + FINNHUB + SUPABASE</div>', unsafe_allow_html=True)
