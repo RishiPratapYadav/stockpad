@@ -98,9 +98,14 @@ def fetch_market_data(ticker):
 
         profile = finnhub_get("stock/profile2", {"symbol": t})
         name     = profile.get("name") or t
-        sector   = profile.get("gsector") or profile.get("sector") or "—"
-        industry = profile.get("finnhubIndustry") or profile.get("industry") or "—"
+        # Finnhub uses 'finnhubIndustry' for industry; sector comes from ggroup/gcategory
+        industry = profile.get("finnhubIndustry") or "—"
+        sector   = profile.get("ggroup") or profile.get("gcategory") or profile.get("gind") or "—"
         mktcap   = profile.get("marketCapitalization")
+
+        # Debug: show raw profile keys in sidebar (remove after confirming)
+        with st.sidebar.expander(f"🔍 Debug: {t} profile keys", expanded=False):
+            st.json({k: v for k, v in profile.items() if v})
 
         metrics_resp = finnhub_get("stock/metric", {"symbol": t, "metric": "all"})
         m = metrics_resp.get("metric", {})
@@ -115,6 +120,8 @@ def fetch_market_data(ticker):
 
         # 4. Price target ─────────────────────────────────────────────────────
         pt = finnhub_get("stock/price-target", {"symbol": t})
+        with st.sidebar.expander(f"🔍 Debug: {t} price-target", expanded=False):
+            st.json(pt)
         target_high   = round(float(pt["targetHigh"]),   2) if pt.get("targetHigh")   else None
         target_low    = round(float(pt["targetLow"]),    2) if pt.get("targetLow")    else None
         target_mean   = round(float(pt["targetMean"]),   2) if pt.get("targetMean")   else None
@@ -122,6 +129,8 @@ def fetch_market_data(ticker):
 
         # 5. Analyst recommendations (latest period) ──────────────────────────
         rec_resp = finnhub_get("stock/recommendation", {"symbol": t})
+        with st.sidebar.expander(f"🔍 Debug: {t} recommendation", expanded=False):
+            st.json(rec_resp[:2] if rec_resp else [])
         if rec_resp and len(rec_resp) > 0:
             latest = rec_resp[0]
             a_sb = latest.get("strongBuy",  0)
@@ -139,6 +148,8 @@ def fetch_market_data(ticker):
         insider_resp = finnhub_get("stock/insider-transactions", {
             "symbol": t, "from": date_from, "to": date_to
         })
+        with st.sidebar.expander(f"🔍 Debug: {t} insider-transactions", expanded=False):
+            st.json((insider_resp.get("data") or [])[:3])
         insider_change_3m = None
         if insider_resp and insider_resp.get("data"):
             insider_change_3m = sum(tx.get("change", 0) or 0 for tx in insider_resp["data"])
@@ -147,6 +158,8 @@ def fetch_market_data(ticker):
         mspr_resp = finnhub_get("stock/insider-sentiment", {
             "symbol": t, "from": date_from, "to": date_to
         })
+        with st.sidebar.expander(f"🔍 Debug: {t} insider-sentiment", expanded=False):
+            st.json(mspr_resp)
         mspr = None
         if mspr_resp and mspr_resp.get("data"):
             vals = [d.get("mspr") for d in mspr_resp["data"] if d.get("mspr") is not None]
