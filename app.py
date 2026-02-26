@@ -42,6 +42,10 @@ MARKET_FIELDS = [
     "beta","pb_ratio","ps_ratio","dividend_yield",
     "roe","roa","debt_equity","current_ratio",
     "gross_margin","net_margin","revenue_growth",
+    # new
+    "analyst_target_high","analyst_target_low","analyst_target_mean","analyst_target_median",
+    "analyst_strong_buy","analyst_buy","analyst_hold","analyst_sell","analyst_strong_sell",
+    "insider_mspr","insider_change_3m",
 ]
 
 USER_FIELDS = ["target_buy","target_sell","price_tag","price_tag_pct","sentiment","comments"]
@@ -67,6 +71,18 @@ def fmt_x(v):
 
 def fmt_num(v):
     return f"{float(v):.2f}" if v is not None else "—"
+
+def analyst_consensus(strong_buy, buy, hold, sell, strong_sell):
+    """Return a short consensus label from analyst recommendation counts."""
+    total = (strong_buy or 0) + (buy or 0) + (hold or 0) + (sell or 0) + (strong_sell or 0)
+    if total == 0: return "—"
+    bullish = (strong_buy or 0) + (buy or 0)
+    bearish = (sell or 0) + (strong_sell or 0)
+    ratio = bullish / total
+    if ratio >= 0.7:   return "💪 Strong Buy"
+    elif ratio >= 0.5: return "👍 Buy"
+    elif bearish / total >= 0.5: return "👎 Sell"
+    else:              return "✋ Hold"
 
 def fetch_market_data(ticker):
     try:
@@ -97,28 +113,78 @@ def fetch_market_data(ticker):
                     if v is not None: break
             return round(float(v), 4) if v is not None else None
 
+        # 4. Price target ─────────────────────────────────────────────────────
+        pt = finnhub_get("stock/price-target", {"symbol": t})
+        target_high   = round(float(pt["targetHigh"]),   2) if pt.get("targetHigh")   else None
+        target_low    = round(float(pt["targetLow"]),    2) if pt.get("targetLow")    else None
+        target_mean   = round(float(pt["targetMean"]),   2) if pt.get("targetMean")   else None
+        target_median = round(float(pt["targetMedian"]), 2) if pt.get("targetMedian") else None
+
+        # 5. Analyst recommendations (latest period) ──────────────────────────
+        rec_resp = finnhub_get("stock/recommendation", {"symbol": t})
+        if rec_resp and len(rec_resp) > 0:
+            latest = rec_resp[0]
+            a_sb = latest.get("strongBuy",  0)
+            a_b  = latest.get("buy",        0)
+            a_h  = latest.get("hold",       0)
+            a_s  = latest.get("sell",       0)
+            a_ss = latest.get("strongSell", 0)
+        else:
+            a_sb = a_b = a_h = a_s = a_ss = None
+
+        # 6. Insider transactions — net share change last 90 days ─────────────
+        from datetime import date, timedelta
+        date_to   = date.today().isoformat()
+        date_from = (date.today() - timedelta(days=90)).isoformat()
+        insider_resp = finnhub_get("stock/insider-transactions", {
+            "symbol": t, "from": date_from, "to": date_to
+        })
+        insider_change_3m = None
+        if insider_resp and insider_resp.get("data"):
+            insider_change_3m = sum(tx.get("change", 0) or 0 for tx in insider_resp["data"])
+
+        # 7. Insider sentiment — avg MSPR last 90 days ────────────────────────
+        mspr_resp = finnhub_get("stock/insider-sentiment", {
+            "symbol": t, "from": date_from, "to": date_to
+        })
+        mspr = None
+        if mspr_resp and mspr_resp.get("data"):
+            vals = [d.get("mspr") for d in mspr_resp["data"] if d.get("mspr") is not None]
+            mspr = round(sum(vals) / len(vals), 4) if vals else None
+
         return {
-            "name":          name,
-            "sector":        sector,
-            "industry":      industry,
-            "price":         round(float(price), 2),
-            "change_pct":    chg,
-            "market_cap":    fmt_cap(mktcap * 1_000_000) if mktcap else None,
-            "pe_ratio":      safe("peBasicExclExtraTTM", ["peTTM"]),
-            "week52_high":   safe("52WeekHigh"),
-            "week52_low":    safe("52WeekLow"),
-            "week52_return": safe("52WeekPriceReturnDaily"),
-            "beta":          safe("beta"),
-            "pb_ratio":      safe("pbAnnual", ["pbQuarterly"]),
-            "ps_ratio":      safe("psAnnual", ["psTTM"]),
-            "dividend_yield":safe("dividendYieldIndicatedAnnual"),
-            "roe":           safe("roeTTM", ["roeRfy"]),
-            "roa":           safe("roaTTM", ["roaRfy"]),
-            "debt_equity":   safe("totalDebt/totalEquityAnnual", ["totalDebt/totalEquityQuarterly"]),
-            "current_ratio": safe("currentRatioAnnual", ["currentRatioQuarterly"]),
-            "gross_margin":  safe("grossMarginTTM", ["grossMarginAnnual"]),
-            "net_margin":    safe("netProfitMarginTTM", ["netProfitMarginAnnual"]),
-            "revenue_growth":safe("revenueGrowthTTMYoy", ["revenueGrowth3Y"]),
+            "name":                  name,
+            "sector":                sector,
+            "industry":              industry,
+            "price":                 round(float(price), 2),
+            "change_pct":            chg,
+            "market_cap":            fmt_cap(mktcap * 1_000_000) if mktcap else None,
+            "pe_ratio":              safe("peBasicExclExtraTTM", ["peTTM"]),
+            "week52_high":           safe("52WeekHigh"),
+            "week52_low":            safe("52WeekLow"),
+            "week52_return":         safe("52WeekPriceReturnDaily"),
+            "beta":                  safe("beta"),
+            "pb_ratio":              safe("pbAnnual", ["pbQuarterly"]),
+            "ps_ratio":              safe("psAnnual", ["psTTM"]),
+            "dividend_yield":        safe("dividendYieldIndicatedAnnual"),
+            "roe":                   safe("roeTTM", ["roeRfy"]),
+            "roa":                   safe("roaTTM", ["roaRfy"]),
+            "debt_equity":           safe("totalDebt/totalEquityAnnual", ["totalDebt/totalEquityQuarterly"]),
+            "current_ratio":         safe("currentRatioAnnual", ["currentRatioQuarterly"]),
+            "gross_margin":          safe("grossMarginTTM", ["grossMarginAnnual"]),
+            "net_margin":            safe("netProfitMarginTTM", ["netProfitMarginAnnual"]),
+            "revenue_growth":        safe("revenueGrowthTTMYoy", ["revenueGrowth3Y"]),
+            "analyst_target_high":   target_high,
+            "analyst_target_low":    target_low,
+            "analyst_target_mean":   target_mean,
+            "analyst_target_median": target_median,
+            "analyst_strong_buy":    a_sb,
+            "analyst_buy":           a_b,
+            "analyst_hold":          a_h,
+            "analyst_sell":          a_s,
+            "analyst_strong_sell":   a_ss,
+            "insider_mspr":          mspr,
+            "insider_change_3m":     insider_change_3m,
         }
     except requests.exceptions.HTTPError as e:
         st.error(f"Finnhub API error for **{ticker}**: {e}")
@@ -237,6 +303,17 @@ else:
             "_gm":            r.get("gross_margin"),
             "_nm":            r.get("net_margin"),
             "_rg":            r.get("revenue_growth"),
+            "_insider_mspr":          r.get("insider_mspr"),
+            "_insider_change_3m":     r.get("insider_change_3m"),
+            "_analyst_target_mean":   r.get("analyst_target_mean"),
+            "_analyst_target_median": r.get("analyst_target_median"),
+            "_analyst_target_high":   r.get("analyst_target_high"),
+            "_analyst_target_low":    r.get("analyst_target_low"),
+            "_analyst_sb":            r.get("analyst_strong_buy"),
+            "_analyst_b":             r.get("analyst_buy"),
+            "_analyst_h":             r.get("analyst_hold"),
+            "_analyst_s":             r.get("analyst_sell"),
+            "_analyst_ss":            r.get("analyst_strong_sell"),
             # user fields
             "Buy Target":     r.get("target_buy")    or "",
             "Sell Target":    r.get("target_sell")   or "",
@@ -352,6 +429,21 @@ else:
             "Gross Margin": fmt_pct(r["_gm"]),
             "Net Margin":   fmt_pct(r["_nm"]),
             "Rev Growth":   fmt_pct(r["_rg"]),
+            # Analyst price targets
+            "Tgt Mean":     fmt_price(r["_analyst_target_mean"]),
+            "Tgt Median":   fmt_price(r["_analyst_target_median"]),
+            "Tgt High":     fmt_price(r["_analyst_target_high"]),
+            "Tgt Low":      fmt_price(r["_analyst_target_low"]),
+            # Analyst consensus
+            "Consensus":    analyst_consensus(r["_analyst_sb"],r["_analyst_b"],r["_analyst_h"],r["_analyst_s"],r["_analyst_ss"]),
+            "💪 SB":        int(r["_analyst_sb"]) if r["_analyst_sb"] is not None else "—",
+            "👍 B":         int(r["_analyst_b"])  if r["_analyst_b"]  is not None else "—",
+            "✋ H":         int(r["_analyst_h"])  if r["_analyst_h"]  is not None else "—",
+            "👎 S":         int(r["_analyst_s"])  if r["_analyst_s"]  is not None else "—",
+            "🚫 SS":        int(r["_analyst_ss"]) if r["_analyst_ss"] is not None else "—",
+            # Insider data
+            "Insider MSPR": fmt_num(r["_insider_mspr"]),
+            "Insider Δ 3M": f"{int(r['_insider_change_3m']):+,}" if r["_insider_change_3m"] is not None else "—",
             "Buy Target":   r["Buy Target"],
             "Sell Target":  r["Sell Target"],
             "Price Tag":    r["Price Tag"],
@@ -360,11 +452,16 @@ else:
             "Comments":     r["Comments"],
         })
 
+    NEW_COLS = ["Tgt Mean","Tgt Median","Tgt High","Tgt Low",
+                "Consensus","💪 SB","👍 B","✋ H","👎 S","🚫 SS",
+                "Insider MSPR","Insider Δ 3M"]
+
     display_df = pd.DataFrame(display_rows) if display_rows else pd.DataFrame(
         columns=["Ticker","Name","Sector","Industry","Price","% Chg",
                  "P/E","P/B","P/S","52W High","52W Low","52W Return",
                  "Beta","Debt/Equity","Curr Ratio","Div Yield",
                  "ROE","ROA","Gross Margin","Net Margin","Rev Growth",
+                 *NEW_COLS,
                  "Buy Target","Sell Target","Price Tag","Tag %","Sentiment","Comments"]
     )
 
@@ -374,38 +471,55 @@ else:
     DISABLED = ["Ticker","Name","Sector","Industry","Price","% Chg",
                 "P/E","P/B","P/S","52W High","52W Low","52W Return",
                 "Beta","Debt/Equity","Curr Ratio","Div Yield",
-                "ROE","ROA","Gross Margin","Net Margin","Rev Growth"]
+                "ROE","ROA","Gross Margin","Net Margin","Rev Growth",
+                *NEW_COLS]
 
     edited_df = st.data_editor(
         display_df, use_container_width=True, hide_index=True, disabled=DISABLED,
         column_config={
-            "Ticker":       st.column_config.TextColumn("TICKER",        width="small"),
-            "Name":         st.column_config.TextColumn("NAME",          width="medium"),
-            "Sector":       st.column_config.TextColumn("SECTOR",        width="medium"),
-            "Industry":     st.column_config.TextColumn("INDUSTRY",      width="medium"),
-            "Price":        st.column_config.TextColumn("PRICE",         width="small"),
-            "% Chg":        st.column_config.TextColumn("% CHG",         width="small"),
-            "P/E":          st.column_config.TextColumn("P/E",           width="small"),
-            "P/B":          st.column_config.TextColumn("P/B",           width="small"),
-            "P/S":          st.column_config.TextColumn("P/S",           width="small"),
-            "52W High":     st.column_config.TextColumn("52W HIGH",      width="small"),
-            "52W Low":      st.column_config.TextColumn("52W LOW",       width="small"),
-            "52W Return":   st.column_config.TextColumn("52W RETURN",    width="small"),
-            "Beta":         st.column_config.TextColumn("BETA",          width="small"),
-            "Debt/Equity":  st.column_config.TextColumn("DEBT/EQ",       width="small"),
-            "Curr Ratio":   st.column_config.TextColumn("CURR RATIO",    width="small"),
-            "Div Yield":    st.column_config.TextColumn("DIV YIELD",     width="small"),
-            "ROE":          st.column_config.TextColumn("ROE",           width="small"),
-            "ROA":          st.column_config.TextColumn("ROA",           width="small"),
-            "Gross Margin": st.column_config.TextColumn("GROSS MARGIN",  width="small"),
-            "Net Margin":   st.column_config.TextColumn("NET MARGIN",    width="small"),
-            "Rev Growth":   st.column_config.TextColumn("REV GROWTH",    width="small"),
-            "Buy Target":   st.column_config.TextColumn("BUY TARGET 🎯", width="small"),
-            "Sell Target":  st.column_config.TextColumn("SELL TARGET 🎯",width="small"),
-            "Price Tag":    st.column_config.TextColumn("PRICE TAG 🏷️",  width="small"),
-            "Tag %":        st.column_config.TextColumn("TAG % 📊",      width="small"),
-            "Sentiment":    st.column_config.SelectboxColumn("SENTIMENT 🧭", width="medium", options=SENTIMENTS),
-            "Comments":     st.column_config.TextColumn("COMMENTS 📝",   width="large"),
+            "Ticker":        st.column_config.TextColumn("TICKER",         width="small"),
+            "Name":          st.column_config.TextColumn("NAME",           width="medium"),
+            "Sector":        st.column_config.TextColumn("SECTOR",         width="medium"),
+            "Industry":      st.column_config.TextColumn("INDUSTRY",       width="medium"),
+            "Price":         st.column_config.TextColumn("PRICE",          width="small"),
+            "% Chg":         st.column_config.TextColumn("% CHG",          width="small"),
+            "P/E":           st.column_config.TextColumn("P/E",            width="small"),
+            "P/B":           st.column_config.TextColumn("P/B",            width="small"),
+            "P/S":           st.column_config.TextColumn("P/S",            width="small"),
+            "52W High":      st.column_config.TextColumn("52W HIGH",       width="small"),
+            "52W Low":       st.column_config.TextColumn("52W LOW",        width="small"),
+            "52W Return":    st.column_config.TextColumn("52W RETURN",     width="small"),
+            "Beta":          st.column_config.TextColumn("BETA",           width="small"),
+            "Debt/Equity":   st.column_config.TextColumn("DEBT/EQ",        width="small"),
+            "Curr Ratio":    st.column_config.TextColumn("CURR RATIO",     width="small"),
+            "Div Yield":     st.column_config.TextColumn("DIV YIELD",      width="small"),
+            "ROE":           st.column_config.TextColumn("ROE",            width="small"),
+            "ROA":           st.column_config.TextColumn("ROA",            width="small"),
+            "Gross Margin":  st.column_config.TextColumn("GROSS MARGIN",   width="small"),
+            "Net Margin":    st.column_config.TextColumn("NET MARGIN",      width="small"),
+            "Rev Growth":    st.column_config.TextColumn("REV GROWTH",     width="small"),
+            # Analyst targets
+            "Tgt Mean":      st.column_config.TextColumn("TGT MEAN 🎯",    width="small"),
+            "Tgt Median":    st.column_config.TextColumn("TGT MEDIAN 🎯",  width="small"),
+            "Tgt High":      st.column_config.TextColumn("TGT HIGH ⬆",     width="small"),
+            "Tgt Low":       st.column_config.TextColumn("TGT LOW ⬇",      width="small"),
+            # Analyst consensus
+            "Consensus":     st.column_config.TextColumn("CONSENSUS 📊",   width="medium"),
+            "💪 SB":         st.column_config.TextColumn("💪 STR BUY",     width="small"),
+            "👍 B":          st.column_config.TextColumn("👍 BUY",         width="small"),
+            "✋ H":          st.column_config.TextColumn("✋ HOLD",        width="small"),
+            "👎 S":          st.column_config.TextColumn("👎 SELL",        width="small"),
+            "🚫 SS":         st.column_config.TextColumn("🚫 STR SELL",    width="small"),
+            # Insider
+            "Insider MSPR":  st.column_config.TextColumn("INSIDER MSPR",   width="small"),
+            "Insider Δ 3M":  st.column_config.TextColumn("INSIDER Δ 3M",   width="small"),
+            # User fields
+            "Buy Target":    st.column_config.TextColumn("BUY TARGET 🎯",  width="small"),
+            "Sell Target":   st.column_config.TextColumn("SELL TARGET 🎯", width="small"),
+            "Price Tag":     st.column_config.TextColumn("PRICE TAG 🏷️",   width="small"),
+            "Tag %":         st.column_config.TextColumn("TAG % 📊",       width="small"),
+            "Sentiment":     st.column_config.SelectboxColumn("SENTIMENT 🧭", width="medium", options=SENTIMENTS),
+            "Comments":      st.column_config.TextColumn("COMMENTS 📝",    width="large"),
         },
         key="main_editor", num_rows="fixed",
     )
@@ -445,4 +559,4 @@ else:
                        file_name=f"stockpad_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                        mime="text/csv")
 
-st.markdown('<div style="margin-top:40px;padding-top:12px;border-top:1px solid #1c2030;font-size:10px;color:#2d3148;letter-spacing:2px;text-align:center;">STOCKPAD v0.4 · STREAMLIT + FINNHUB + SUPABASE</div>', unsafe_allow_html=True)
+st.markdown('<div style="margin-top:40px;padding-top:12px;border-top:1px solid #1c2030;font-size:10px;color:#2d3148;letter-spacing:2px;text-align:center;">STOCKPAD v0.5 · STREAMLIT + FINNHUB + SUPABASE</div>', unsafe_allow_html=True)
